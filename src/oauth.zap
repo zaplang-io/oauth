@@ -128,3 +128,31 @@ def _read_seconds(dict[str, JsonValue] fields, str key) -> Optional[int64]:
         case _:
             pass
     raise InvalidTokenError(key + " must be a non-negative integer")
+
+# OAuth form parameters and Basic credentials use UTF-8 percent encoding
+# with spaces represented by '+' (RFC 6749 Appendix B).
+def _form_component(str value) -> str:
+    return url.quote(value).replace("%20", "+")
+
+def _encode_token_form(dict[str, str] form) -> str:
+    list[str] encoded = []
+    for key, value in form.items():
+        encoded.append(_form_component(key) + "=" + _form_component(value))
+    return "&".join(encoded)
+
+def _basic_authorization(str client_id, str client_secret) -> str:
+    auto credentials = _form_component(client_id) + ":" + _form_component(client_secret)
+    return "Basic " + base64.encode(bytes(credentials))
+
+def _post_token_form(
+    str token_endpoint,
+    str body,
+    dict[str, str] headers,
+    int64 timeout,
+) -> bytes:
+    # A redirect can resend the credentials to a different destination.
+    auto client = http.Client(follow=False, timeout=timeout)
+    try:
+        return client.post(token_endpoint, body, headers)
+    finally:
+        client.shutdown()

@@ -23,5 +23,12 @@ version = "0.0.0"
 oauth = { path = "oauth" }
 MANIFEST
 "$zap" zenv create --no-venv
-cp -R "$root/tests" tests
+mkdir tests
+cp "$root"/tests/*_test.zap tests/
+# Test private request encoding and transport without extending the public API.
+{
+    cat "$root/src/oauth.zap"
+    printf '\n'
+    cat "$root/tests/internal/token_transport_test.zap"
+} > tests/token_transport_test.zap
 ZAP_ZENV="$scratch/zenv" "$zap" test tests/

@@ -44,6 +44,7 @@ an expired token it passes the refresh credential to `fetch`, a `fn(str) -> Toke
 and returns the replacement. Keep the returned token for subsequent requests.
 The replacement inherits the old refresh credential if the response omits it.
 Live token endpoint integration is tracked in [#3](https://github.com/zaplang-io/oauth/issues/3).
+Its typed provider errors depend on [Zap #1432](https://github.com/zaplang-io/zap/issues/1432).
 
 `InvalidTokenError` identifies malformed token JSON or invalid fields.
 `MissingRefreshTokenError` identifies an expired token with no refresh credential.

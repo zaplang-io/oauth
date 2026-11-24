@@ -32,3 +32,13 @@ introduces them.
 
 The token field and JSON key use `scope`. Zap supports the identifier through
 the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/zap/issues/1405).
+
+## Token endpoint transport ([#3](https://github.com/zaplang-io/oauth/issues/3))
+
+- Encode form parameters and HTTP Basic credentials as UTF-8 form components
+  per RFC 6749 §2.3.1 and Appendix B.
+- Send credential-bearing POST requests with redirects disabled. Handle the
+  original response at the configured token endpoint.
+
+The provider error model depends on
+[Zap support for structured exception fields](https://github.com/zaplang-io/zap/issues/1432).
