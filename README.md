@@ -6,7 +6,9 @@ OAuth 1/2 client for [Zap](https://github.com/zaplang-io/zap) — an official **
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-The OAuth 2 bearer token model, token endpoint client, and Authorization Code flow with PKCE are available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the remaining flows.
+The package supports OAuth 2 bearer tokens, token endpoint exchange,
+Authorization Code with PKCE, and Client Credentials. The
+[Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the remaining work.
 
 ## Goals
 
@@ -115,6 +117,25 @@ and validates its state before any token request. A mismatch raises
 
 For a public client, set `client_secret=""` and
 `token_endpoint_auth_method="none"`.
+
+## Client Credentials
+
+```zap
+import oauth
+
+client = oauth.Client("service", "example-secret", "https://issuer.example/token", timeout=5000)
+token = client.fetch_client_credentials(scope=["api:read"])
+
+source = client.client_credentials_token_source(scope=["api:read"], leeway=30)
+token = source.token()
+```
+
+Use `fetch_client_credentials` for a single exchange. Reuse a token source to
+cache the token and reacquire it when it reaches the expiry threshold.
+Concurrent callers share the acquisition, and each receives its own token
+value. The source defaults to a 60-second leeway. An empty scope list omits
+the scope field. This grant requires client authentication and discards any
+refresh token returned by the provider.
 
 ## Build and test
 

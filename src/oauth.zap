@@ -273,8 +273,12 @@ struct Client:
             raise ValueError("client_id must be non-empty")
         if self.timeout < 0:
             raise ValueError("token endpoint timeout must be non-negative")
-        if form.get("grant_type").unwrap_or("") == "":
+        auto grant_type = form.get("grant_type").unwrap_or("")
+        if grant_type == "":
             raise ValueError("grant_type must be non-empty")
+        auto client_credentials = grant_type == "client_credentials"
+        if client_credentials and self.token_endpoint_auth_method == "none":
+            raise ValueError("client credentials grant requires client authentication")
         auto endpoint = _validate_token_endpoint(self.token_endpoint)
         auto response = _post_token_form(
             endpoint,
@@ -284,7 +288,34 @@ struct Client:
             self.token_endpoint_auth_method,
             self.timeout,
         )
-        return _decode_token_response(http.status(response), http.body(response))
+        return _decode_token_response(
+            http.status(response),
+            http.body(response),
+            client_credentials,
+        )
+
+    # Obtain a bearer token using this client's credentials.
+    def fetch_client_credentials(self, list[str] scope = []) -> Token:
+        return self.fetch_token(_client_credentials_form(scope))
+
+    # Create a token source for this client and scope. It re-acquires a token
+    # within leeway seconds of expiry. The first request occurs on token().
+    def client_credentials_token_source(
+        self,
+        list[str] scope = [],
+        int64 leeway = 60,
+    ) -> ClientCredentialsTokenSource:
+        if leeway < 0:
+            raise ValueError("token expiry leeway must be non-negative")
+        auto form = _client_credentials_form(scope)
+        auto configured = Client(
+            self.client_id,
+            self.client_secret,
+            self.token_endpoint,
+            self.token_endpoint_auth_method,
+            self.timeout,
+        )
+        return ClientCredentialsTokenSource(configured, form, leeway)
 
     # Exchange a refresh credential for a replacement bearer token.
     def refresh_token(self, str refresh_token) -> Token:
@@ -408,6 +439,50 @@ struct Client:
                 "code_verifier": verifier,
             },
         )
+
+# A coroutine-safe source that caches a client credentials bearer token.
+struct ClientCredentialsTokenSource:
+    Client _client
+    dict[str, str] _form
+    int64 _leeway
+    Optional[Token] _cached = None
+    bytes _mutex = sync.mutex()
+
+    # Return a usable token. Concurrent calls share an in-flight acquisition.
+    def token(self) -> Token:
+        sync.lock(self._mutex)
+        try:
+            if self._cached.is_some():
+                auto cached = self._cached.unwrap()
+                if not cached.is_expired(self._leeway):
+                    return _copy_token(cached)
+            auto fresh = self._client.fetch_token(self._form)
+            if fresh.is_expired(leeway=0):
+                raise InvalidTokenError(
+                    "client credentials endpoint returned an expired token",
+                )
+            self._cached = Optional.Some(fresh)
+            return _copy_token(fresh)
+        finally:
+            sync.unlock(self._mutex)
+
+def _copy_token(Token token) -> Token:
+    return Token(
+        token.access_token,
+        token.token_type,
+        token.expires_at,
+        token.expires_in,
+        token.refresh_token,
+        token.scope,
+    )
+
+def _client_credentials_form(list[str] scope) -> dict[str, str]:
+    auto form = {"grant_type": "client_credentials"}
+    for item in scope:
+        _validate_scope_token(item)
+    if len(scope) > 0:
+        form["scope"] = " ".join(scope)
+    return form
 
 # The callback is malformed or does not match the initiating request.
 @exception
@@ -534,7 +609,11 @@ def _validate_token_endpoint(str endpoint) -> str:
             raise ValueError("token endpoint requires HTTPS outside numeric loopback")
     return url.build(parts)
 
-def _decode_token_response(int64 status, str document) -> Token:
+def _decode_token_response(
+    int64 status,
+    str document,
+    bool client_credentials,
+) -> Token:
     auto success = status >= 200 and status < 300
     try:
         match _load_json(document):
@@ -542,6 +621,8 @@ def _decode_token_response(int64 status, str document) -> Token:
                 if "error" in fields:
                     _raise_provider_error(status, fields)
                 if success:
+                    if client_credentials and "refresh_token" in fields:
+                        del fields["refresh_token"]
                     return _decode_token(fields)
             case _:
                 if success:
