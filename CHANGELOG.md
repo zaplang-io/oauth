@@ -13,3 +13,5 @@
   [#4](https://github.com/zaplang-io/oauth/issues/4)
 - Add Client Credentials token acquisition and a coroutine-safe token source
   that reacquires tokens based on expiry. [#5](https://github.com/zaplang-io/oauth/issues/5)
+- Add typed provider metadata parsing, exact issuer validation, and client
+  configuration from metadata. [#6](https://github.com/zaplang-io/oauth/issues/6)

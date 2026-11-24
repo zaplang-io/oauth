@@ -137,6 +137,25 @@ value. The source defaults to a 60-second leeway. An empty scope list omits
 the scope field. This grant requires client authentication and discards any
 refresh token returned by the provider.
 
+## Provider metadata
+
+Parse a discovery document that you already obtained from a trusted source and
+apply its endpoints to a client:
+
+```zap
+metadata = oauth.ProviderMetadata.from_json("https://issuer.example/tenant", document)
+client = oauth.Client.from_metadata(metadata, "service", "example-secret", timeout=5000)
+```
+
+The issuer claim must match exactly. The parser accepts up to 65,536 UTF-8
+bytes, validates the endpoint URLs, and exposes advertised capabilities such
+as scopes, grant types, and PKCE methods. A token endpoint is required for the
+supported flows. An authorization endpoint may be omitted when the provider
+advertises only grants that do not use it, such as Client Credentials.
+
+Live discovery is tracked in [#6](https://github.com/zaplang-io/oauth/issues/6)
+and depends on [bounded HTTP response reads](https://github.com/zaplang-io/zap/issues/1448).
+
 ## Build and test
 
 Run the native `zap test` suite against a temporary consumer that installs this
