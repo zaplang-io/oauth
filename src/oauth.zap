@@ -162,6 +162,13 @@ def _post_token_form(
     match auth_method:
         case "client_secret_basic":
             headers["Authorization"] = _basic_authorization(client_id, client_secret)
+        case "none":
+            if client_secret != "":
+                raise ValueError(
+                    "public client authentication requires an empty client_secret",
+                )
+            fields = form.copy()
+            fields["client_id"] = client_id
         case "client_secret_post":
             fields = form.copy()
             fields["client_id"] = client_id
@@ -256,6 +263,8 @@ struct Client:
     str token_endpoint
     str token_endpoint_auth_method = "client_secret_basic"
     int64 timeout = 0
+    str authorization_endpoint = ""
+    str redirect_uri = ""
 
     # Exchange a grant form for a bearer token. The client adds authentication.
     # Timeout is a total deadline in milliseconds, with zero for no deadline.
@@ -291,6 +300,225 @@ struct Client:
             lambda credential: self.refresh_token(credential),
             leeway,
         )
+
+    # Build an authorization URL with a new S256 verifier and an optional
+    # caller-supplied state. Keep the returned tuple in the initiating session.
+    def authorization_url(
+        self,
+        list[str] scope = [],
+        Optional[str] state = None,
+    ) -> (str, str, str):
+        auto endpoint = _authorization_endpoint(self.authorization_endpoint)
+        _registered_redirect(self.redirect_uri)
+        if self.client_id == "":
+            raise ValueError("client_id must be non-empty")
+        auto expected = ""
+        if state.is_some():
+            expected = state.unwrap()
+        else:
+            expected = crypto.token_urlsafe(32)
+        if expected == "":
+            raise ValueError("OAuth state must be non-empty")
+        for octet in bytes(expected):
+            if octet < 32 or octet > 126:
+                raise ValueError("OAuth state must be printable ASCII")
+        auto verifier = crypto.token_urlsafe(32)
+        auto params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "state": expected,
+            "code_challenge": _pkce_challenge(verifier),
+            "code_challenge_method": "S256",
+        }
+        for item in scope:
+            _validate_scope_token(item)
+        if len(scope) > 0:
+            params["scope"] = " ".join(scope)
+        auto existing = _authorization_query(endpoint.query)
+        for key in ["response_type", "client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "scope"]:
+            if key in existing:
+                raise ValueError(
+                    "authorization endpoint query already contains an OAuth parameter",
+                )
+        auto query = _encode_token_form(params)
+        if endpoint.query != "":
+            query = endpoint.query + "&" + query
+        endpoint.query = query
+        return (url.build(endpoint), expected, verifier)
+
+    # Verify the callback from the browser against the tuple saved in its
+    # initiating session, then exchange the authorization code over the endpoint.
+    def exchange_code(self, str callback_url, (str, str, str) request) -> Token:
+        auto request_url, expected, verifier = request
+        auto redirect = _registered_redirect(self.redirect_uri)
+        auto callback = _callback_parts(callback_url)
+        if not _same_location(redirect, callback):
+            raise InvalidAuthorizationResponseError(
+                "callback does not match the registered redirect URI",
+            )
+        auto fields = _authorization_query(callback.query)
+        _check_redirect_query(redirect.query, fields)
+        auto state = _callback_field(fields, "state")
+        if expected == "" or not crypto.constant_time_eq(bytes(expected), bytes(state)):
+            raise MismatchingStateError("authorization response state does not match")
+        auto endpoint = _authorization_endpoint(self.authorization_endpoint)
+        auto initiated = _authorization_endpoint(request_url)
+        if not _same_location(endpoint, initiated):
+            raise InvalidAuthorizationResponseError(
+                "authorization request does not match the authorization endpoint",
+            )
+        auto params = _authorization_query(initiated.query)
+        _check_redirect_query(endpoint.query, params)
+        auto expected_params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "state": expected,
+            "code_challenge_method": "S256",
+            "code_challenge": _pkce_challenge(verifier),
+        }
+        for key, value in expected_params.items():
+            if _callback_field(params, key) != value:
+                raise InvalidAuthorizationResponseError(
+                    "authorization request does not match the client or PKCE verifier",
+                )
+        auto error = _callback_field(fields, "error")
+        auto code = _callback_field(fields, "code")
+        if "error" in fields:
+            if error == "" or "code" in fields:
+                raise InvalidAuthorizationResponseError(
+                    "malformed authorization error response",
+                )
+            raise AuthorizationResponseError(
+                "authorization server rejected the request",
+                error,
+                _callback_optional(fields, "error_description"),
+                _callback_optional(fields, "error_uri"),
+            )
+        if code == "":
+            raise InvalidAuthorizationResponseError(
+                "authorization response is missing a code",
+            )
+        return self.fetch_token(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": self.redirect_uri,
+                "code_verifier": verifier,
+            },
+        )
+
+# The callback is malformed or does not match the initiating request.
+@exception
+struct InvalidAuthorizationResponseError:
+    str message
+
+# The callback state does not match the initiating session.
+@exception
+struct MismatchingStateError:
+    str message
+
+# The authorization server declined the browser authorization.
+@exception
+struct AuthorizationResponseError:
+    str message
+    str error
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+def _authorization_endpoint(str endpoint) -> UrlParts:
+    auto parts = _absolute_oauth_uri(endpoint)
+    if not parts.has_authority or parts.host == "" or parts.scheme != "https" and (parts.scheme != "http" or parts.host != "127.0.0.1" and parts.host != "::1"):
+        raise ValueError(
+            "authorization endpoint requires HTTPS outside numeric loopback",
+        )
+    return parts
+
+def _absolute_oauth_uri(str address) -> UrlParts:
+    for octet in bytes(address):
+        if octet < 33 or octet >= 127:
+            raise ValueError("OAuth URI must be ASCII without whitespace")
+    auto parts = url.split(address)
+    if parts.scheme == "" or parts.userinfo != "" or "#" in address:
+        raise ValueError(
+            "OAuth URI must be absolute without user information or a fragment",
+        )
+    return parts
+
+def _redirect_parts(str address) -> UrlParts:
+    auto parts = _absolute_oauth_uri(address)
+    if parts.scheme == "http" or parts.scheme == "https":
+        if not parts.has_authority or parts.host == "":
+            raise ValueError("HTTP redirect URI must include a host")
+    elif not parts.has_authority and parts.path == "":
+        raise ValueError("redirect URI must identify a callback")
+    return parts
+
+def _registered_redirect(str address) -> UrlParts:
+    auto parts = _redirect_parts(address)
+    auto fields = _authorization_query(parts.query)
+    for key in ["state", "code", "error", "error_description", "error_uri"]:
+        if key in fields:
+            raise ValueError(
+                "registered redirect query already contains an OAuth response parameter",
+            )
+    return parts
+
+def _callback_parts(str address) -> UrlParts:
+    try:
+        return _redirect_parts(address)
+    except ValueError:
+        raise InvalidAuthorizationResponseError("callback URI is malformed")
+
+def _hex_octet(int64 value) -> bool:
+    return value >= 48 and value <= 57 or value >= 65 and value <= 70 or value >= 97 and value <= 102
+
+def _authorization_query(str query) -> dict[str, list[str]]:
+    auto octets = bytes(query)
+    for index in range(len(octets)):
+        if octets[index] == 37:
+            if index + 2 >= len(octets) or not _hex_octet(octets[index + 1]) or not _hex_octet(octets[index + 2]):
+                raise InvalidAuthorizationResponseError(
+                    "authorization query contains malformed percent encoding",
+                )
+    try:
+        url.unquote_plus(query, errors="strict")
+    except Exception:
+        raise InvalidAuthorizationResponseError(
+            "authorization query contains invalid UTF-8",
+        )
+    return url.parse_query(query)
+
+def _same_location(UrlParts expected, UrlParts received) -> bool:
+    return expected.scheme == received.scheme and expected.has_authority == received.has_authority and expected.host == received.host and expected.port == received.port and expected.path == received.path
+
+def _check_redirect_query(str query, dict[str, list[str]] fields):
+    for key, values in _authorization_query(query).items():
+        if key not in fields or fields[key] != values:
+            raise InvalidAuthorizationResponseError(
+                "callback does not preserve the registered query",
+            )
+
+def _callback_optional(dict[str, list[str]] fields, str key) -> Optional[str]:
+    if key not in fields:
+        return None
+    auto values = fields[key]
+    if len(values) != 1:
+        raise InvalidAuthorizationResponseError(
+            "authorization parameter was repeated: " + key,
+        )
+    return Optional.Some(values[0])
+
+def _callback_field(dict[str, list[str]] fields, str key) -> str:
+    return _callback_optional(fields, key).unwrap_or("")
+
+def _validate_scope_token(str token):
+    if token == "":
+        raise ValueError("scope entries must be non-empty OAuth scope tokens")
+    for octet in bytes(token):
+        if octet < 33 or octet > 126 or octet == 34 or octet == 92:
+            raise ValueError("scope entries must be non-empty OAuth scope tokens")
 
 def _validate_token_endpoint(str endpoint) -> str:
     for octet in bytes(endpoint):
@@ -345,3 +573,19 @@ def _raise_provider_error(int64 status, dict[str, JsonValue] fields):
             raise InvalidScopeError(message, status, error, description, uri)
         case _:
             raise TokenEndpointError(message, status, error, description, uri)
+
+# RFC 7636 requires 43 to 128 ASCII unreserved characters for a verifier.
+def _pkce_challenge(str verifier) -> str:
+    auto octets = bytes(verifier)
+    if len(octets) < 43 or len(octets) > 128:
+        raise ValueError(
+            "PKCE verifier must have 43 to 128 unreserved ASCII characters",
+        )
+    for octet in octets:
+        if not (octet >= 65 and octet <= 90 or octet >= 97 and octet <= 122 or octet >= 48 and octet <= 57 or octet == 45 or octet == 46 or octet == 95 or octet == 126):
+            raise ValueError(
+                "PKCE verifier must have 43 to 128 unreserved ASCII characters",
+            )
+    auto digest = crypto.sha256_new()
+    crypto.update(digest, octets)
+    return base64.urlsafe_encode_nopad(crypto.digest(digest))

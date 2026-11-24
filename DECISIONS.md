@@ -51,3 +51,17 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
   [Zap’s structured exception fields](https://github.com/zaplang-io/zap/issues/1432).
   Unknown provider codes use the base type. Failed HTTP responses without a
   usable provider error use `TokenEndpointHTTPError`.
+
+## Authorization Code and PKCE ([#4](https://github.com/zaplang-io/oauth/issues/4))
+
+- `Client.authorization_url()` returns `(url, state, verifier)` for the caller
+  to keep in the initiating session. It always generates a fresh verifier and
+  uses S256. The caller can supply `state`, which otherwise uses secure random
+  bytes like the verifier.
+- `Client.exchange_code(callback_url, request)` accepts that tuple and validates
+  the registered callback URI, state, and PKCE binding before posting the code.
+  `Client.fetch_token(form)` remains the shared token endpoint method.
+- Public clients select `token_endpoint_auth_method="none"` with an empty
+  client secret. The exchange sends their `client_id` and verifier in the form.
+- The provider enforces single use of authorization codes. Callers should take
+  the saved tuple out of their session as part of callback processing.

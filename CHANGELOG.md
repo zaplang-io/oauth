@@ -8,3 +8,6 @@
 - Add `Client.fetch_token` and live refresh with form-encoded client
   authentication, request deadlines, and typed provider errors.
   [#3](https://github.com/zaplang-io/oauth/issues/3)
+- Add Authorization Code exchange with S256 PKCE, generated state, callback
+  validation, and support for public clients.
+  [#4](https://github.com/zaplang-io/oauth/issues/4)
