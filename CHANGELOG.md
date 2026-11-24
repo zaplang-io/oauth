@@ -11,3 +11,5 @@
 - Add Authorization Code exchange with S256 PKCE, generated state, callback
   validation, and support for public clients.
   [#4](https://github.com/zaplang-io/oauth/issues/4)
+- Add Client Credentials token acquisition and a coroutine-safe token source
+  that reacquires tokens based on expiry. [#5](https://github.com/zaplang-io/oauth/issues/5)

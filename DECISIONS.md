@@ -65,3 +65,15 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
   client secret. The exchange sends their `client_id` and verifier in the form.
 - The provider enforces single use of authorization codes. Callers should take
   the saved tuple out of their session as part of callback processing.
+
+## Client Credentials ([#5](https://github.com/zaplang-io/oauth/issues/5))
+
+- Expose `Client.fetch_client_credentials(scope)` and
+  `Client.client_credentials_token_source(scope, leeway)` on the shared client.
+  The grant uses the same endpoint authentication as `Client.fetch_token`.
+- Send requested scopes as a space-delimited form field. Omit the field for an
+  empty scope list. Ignore any refresh token returned for this grant.
+- The token source captures the client configuration and requested scope. It
+  caches the last usable token, shares acquisitions across concurrent callers,
+  and obtains a new token with another Client Credentials grant. The default
+  refresh leeway is 60 seconds, matching the token model.
