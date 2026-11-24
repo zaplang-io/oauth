@@ -6,7 +6,7 @@ OAuth 1/2 client for [Zap](https://github.com/zaplang-io/zap) — an official **
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-The OAuth 2 bearer token model and token endpoint client are available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the grant flows.
+The OAuth 2 bearer token model, token endpoint client, and Authorization Code flow with PKCE are available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the remaining flows.
 
 ## Goals
 
@@ -83,29 +83,38 @@ two fields are optional. `TokenEndpointHTTPError` covers failed HTTP responses
 without usable OAuth error fields. A malformed successful token response raises
 `InvalidTokenError`. A transport deadline raises `TimeoutError`.
 
-## Planned client usage
+## Authorization Code with PKCE
 
 ```zap
 import oauth
 
-# Authorization Code + PKCE
 client = oauth.Client(
     client_id="abc",
+    client_secret="example-secret",
     redirect_uri="https://app.example/callback",
     token_endpoint="https://issuer.example/token",
     authorization_endpoint="https://issuer.example/authorize",
 )
-url, state, verifier = client.authorization_url(scope=["openid", "profile"])
-# ... user authorizes, provider redirects back with code ...
-token = client.fetch_token(code=code, state=state, code_verifier=verifier)
-
-# Client Credentials
-svc = oauth.Client(client_id="svc", client_secret="s3cret",
-                   token_endpoint="https://issuer.example/token")
-token = svc.fetch_token(grant_type="client_credentials", scope=["api"])
+request = client.authorization_url(scope=["openid", "profile"])
+url, state, verifier = request
+# Save request in the user's session and redirect the browser to url.
+# Retrieve the request from that same session when the provider redirects back.
+token = client.exchange_code(callback_url, request)
 ```
 
-The exact signatures (keyword vs positional, defaults, return shapes) are not final. Any ambiguity is escalated to the maintainer with Python/Go examples and recorded in [DECISIONS.md](DECISIONS.md) rather than decided unilaterally.
+Each authorization generates a fresh S256 verifier and a random `state` unless
+you supply a session-bound state. Treat the verifier as a secret. Store the
+request tuple in your session and consume it once when processing the callback.
+The provider rejects reuse of an authorization code with `InvalidGrantError`.
+
+`exchange_code` requires the callback URL to match the registered redirect URI
+and validates its state before any token request. A mismatch raises
+`MismatchingStateError`, a malformed callback raises
+`InvalidAuthorizationResponseError`, and an authorization denial raises
+`AuthorizationResponseError` with the provider's error fields.
+
+For a public client, set `client_secret=""` and
+`token_endpoint_auth_method="none"`.
 
 ## Build and test
 
