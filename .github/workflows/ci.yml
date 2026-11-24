@@ -17,4 +17,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Run tests
-        run: zap test tests/
+        run: sh tools/test.sh

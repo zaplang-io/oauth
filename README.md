@@ -6,7 +6,7 @@ OAuth 1/2 client for [Zap](https://github.com/zaplang-io/zap) — an official **
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-> **Status: docs-first.** No implementation yet — the planned surface is tracked in the [issues](https://github.com/zaplang-io/oauth/issues) (see the Tier-1 scope epic).
+The OAuth 2 bearer token model is available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the endpoint and grant flows.
 
 ## Goals
 
@@ -21,7 +21,35 @@ Planned scope (first cut — OAuth 2):
 - **Provider discovery** — OpenID Connect / OAuth `.well-known` metadata.
 - **Device Code flow** (optional) — for input-constrained devices.
 
-## Usage (planned — illustrative only)
+## Bearer tokens
+
+```zap
+import oauth
+
+token = oauth.Token.from_json("{\"access_token\":\"example\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"scope\":\"read\"}")
+print(token.scope.unwrap())
+print(token.is_expired())
+saved = token.to_json()
+restored = oauth.Token.from_json(saved)
+```
+
+`from_json` requires a non-empty access token and a bearer token type, matched
+case-insensitively. `expires_in` and `expires_at` use non-negative integer seconds.
+When both are present, `expires_at` retains the original Unix deadline across
+reloads. `is_expired()` uses a 60-second leeway. Supply `leeway=0` to check the
+actual expiry, or another non-negative number of seconds for an earlier refresh.
+
+`token.ensure_active_token(fetch)` returns the current token while active. For
+an expired token it passes the refresh credential to `fetch`, a `fn(str) -> Token`,
+and returns the replacement. Keep the returned token for subsequent requests.
+The replacement inherits the old refresh credential if the response omits it.
+Live token endpoint integration is tracked in [#3](https://github.com/zaplang-io/oauth/issues/3).
+
+`InvalidTokenError` identifies malformed token JSON or invalid fields.
+`MissingRefreshTokenError` identifies an expired token with no refresh credential.
+Serialized tokens contain credentials and should be stored accordingly.
+
+## Planned client usage
 
 ```zap
 import oauth
@@ -47,10 +75,11 @@ The exact signatures (keyword vs positional, defaults, return shapes) are not fi
 
 ## Build and test
 
-Test cases live under `tests/` and run with the `zap test` methodology:
+Run the native `zap test` suite against a temporary consumer that installs this
+checkout as a package:
 
 ```
-zap test tests/
+sh tools/test.sh
 ```
 
 GitHub Actions runs the suite on pull requests and pushes inside the
