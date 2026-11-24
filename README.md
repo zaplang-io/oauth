@@ -6,7 +6,7 @@ OAuth 1/2 client for [Zap](https://github.com/zaplang-io/zap) — an official **
 - Contributor & agent conventions: [AGENTS.md](AGENTS.md)
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
-The OAuth 2 bearer token model is available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the endpoint and grant flows.
+The OAuth 2 bearer token model and token endpoint client are available. The [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the grant flows.
 
 ## Goals
 
@@ -43,11 +43,45 @@ actual expiry, or another non-negative number of seconds for an earlier refresh.
 an expired token it passes the refresh credential to `fetch`, a `fn(str) -> Token`,
 and returns the replacement. Keep the returned token for subsequent requests.
 The replacement inherits the old refresh credential if the response omits it.
-Live token endpoint integration is tracked in [#3](https://github.com/zaplang-io/oauth/issues/3).
 
 `InvalidTokenError` identifies malformed token JSON or invalid fields.
 `MissingRefreshTokenError` identifies an expired token with no refresh credential.
 Serialized tokens contain credentials and should be stored accordingly.
+
+## Token endpoint
+
+```zap
+import oauth
+
+client = oauth.Client(
+    client_id="service",
+    client_secret="example-secret",
+    token_endpoint="https://issuer.example/token",
+    timeout=5000,
+)
+try:
+    token = client.fetch_token({"grant_type": "client_credentials", "scope": "read"})
+except oauth.TokenEndpointError as failure:
+    print(failure.status, failure.error)
+```
+
+The client defaults to `client_secret_basic`. Set
+`token_endpoint_auth_method="client_secret_post"` to send credentials in the
+form. The endpoint requires HTTPS, with HTTP available on numeric loopback
+addresses. The client returns the original response from redirecting endpoints
+as an error. The total `timeout` is in milliseconds and defaults to `0` for no
+deadline.
+
+`Client.refresh_token(refresh_token)` performs a refresh grant directly.
+`Client.ensure_active_token(token, leeway=60)` checks expiry first and keeps the
+old refresh credential when the replacement omits one.
+
+Standard OAuth provider codes raise named exceptions such as `InvalidClientError`
+and `InvalidGrantError`. A `TokenEndpointError` catch also handles those errors
+and exposes `status`, `error`, `error_description`, and `error_uri`. The last
+two fields are optional. `TokenEndpointHTTPError` covers failed HTTP responses
+without usable OAuth error fields. A malformed successful token response raises
+`InvalidTokenError`. A transport deadline raises `TimeoutError`.
 
 ## Planned client usage
 
