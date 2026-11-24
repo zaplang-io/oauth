@@ -35,10 +35,19 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
 
 ## Token endpoint transport ([#3](https://github.com/zaplang-io/oauth/issues/3))
 
+- Expose `Client.fetch_token(form)` with an explicit `dict[str, str]` of grant
+  parameters. The client owns credential placement. `Client.refresh_token`
+  submits a refresh grant, and `Client.ensure_active_token` connects the token
+  model’s existing refresh behavior to that exchange.
+- Default to `client_secret_basic`, matching Authlib. Callers can select
+  `client_secret_post` with `token_endpoint_auth_method`.
 - Encode form parameters and HTTP Basic credentials as UTF-8 form components
   per RFC 6749 §2.3.1 and Appendix B.
 - Send credential-bearing POST requests with redirects disabled. Handle the
   original response at the configured token endpoint.
-
-The provider error model depends on
-[Zap support for structured exception fields](https://github.com/zaplang-io/zap/issues/1432).
+- Map standard provider codes to named exceptions under `TokenEndpointError`.
+  Every subtype preserves the base field layout for typed catches. Exceptions
+  expose the HTTP status and provider code, description, and URI through
+  [Zap’s structured exception fields](https://github.com/zaplang-io/zap/issues/1432).
+  Unknown provider codes use the base type. Failed HTTP responses without a
+  usable provider error use `TokenEndpointHTTPError`.

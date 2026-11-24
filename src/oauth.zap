@@ -175,3 +175,173 @@ def _post_token_form(
         return client.post(token_endpoint, body, headers)
     finally:
         client.shutdown()
+
+# Keep the base payload layout as a prefix so fields also work in base catches.
+# OAuth token endpoint failures.
+@exception
+struct TokenEndpointError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The provider rejected a malformed token request.
+@exception(TokenEndpointError)
+struct InvalidRequestError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The provider rejected the client credentials.
+@exception(TokenEndpointError)
+struct InvalidClientError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The provider rejected the authorization grant or refresh token.
+@exception(TokenEndpointError)
+struct InvalidGrantError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The client is unauthorized to use the grant.
+@exception(TokenEndpointError)
+struct UnauthorizedClientError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The provider does not support the requested grant.
+@exception(TokenEndpointError)
+struct UnsupportedGrantTypeError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The provider rejected the requested scope.
+@exception(TokenEndpointError)
+struct InvalidScopeError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# The endpoint returned a failed HTTP status without a usable OAuth error.
+@exception(TokenEndpointError)
+struct TokenEndpointHTTPError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# An OAuth 2 client configured for a token endpoint.
+struct Client:
+    str client_id
+    str client_secret
+    str token_endpoint
+    str token_endpoint_auth_method = "client_secret_basic"
+    int64 timeout = 0
+
+    # Exchange a grant form for a bearer token. The client adds authentication.
+    # Timeout is a total deadline in milliseconds, with zero for no deadline.
+    def fetch_token(self, dict[str, str] form) -> Token:
+        if self.client_id == "":
+            raise ValueError("client_id must be non-empty")
+        if self.timeout < 0:
+            raise ValueError("token endpoint timeout must be non-negative")
+        if form.get("grant_type").unwrap_or("") == "":
+            raise ValueError("grant_type must be non-empty")
+        auto endpoint = _validate_token_endpoint(self.token_endpoint)
+        auto response = _post_token_form(
+            endpoint,
+            form,
+            self.client_id,
+            self.client_secret,
+            self.token_endpoint_auth_method,
+            self.timeout,
+        )
+        return _decode_token_response(http.status(response), http.body(response))
+
+    # Exchange a refresh credential for a replacement bearer token.
+    def refresh_token(self, str refresh_token) -> Token:
+        if refresh_token == "":
+            raise ValueError("refresh_token must be non-empty")
+        return self.fetch_token(
+            {"grant_type": "refresh_token", "refresh_token": refresh_token},
+        )
+
+    # Refresh through the configured endpoint only if the current token needs it.
+    def ensure_active_token(self, Token token, int64 leeway = 60) -> Token:
+        return token.ensure_active_token(
+            lambda credential: self.refresh_token(credential),
+            leeway,
+        )
+
+def _validate_token_endpoint(str endpoint) -> str:
+    for octet in bytes(endpoint):
+        if octet < 33 or octet >= 127:
+            raise ValueError("token endpoint must be an ASCII URI without whitespace")
+    auto parts = url.split(endpoint)
+    if not parts.has_authority or parts.host == "" or parts.userinfo != "" or "#" in endpoint:
+        raise ValueError(
+            "token endpoint must be an absolute URI without user information or a fragment",
+        )
+    if parts.scheme != "https":
+        if parts.scheme != "http" or parts.host != "127.0.0.1" and parts.host != "::1":
+            raise ValueError("token endpoint requires HTTPS outside numeric loopback")
+    return url.build(parts)
+
+def _decode_token_response(int64 status, str document) -> Token:
+    auto success = status >= 200 and status < 300
+    try:
+        match _load_json(document):
+            case JsonValue.Object(fields):
+                if "error" in fields:
+                    _raise_provider_error(status, fields)
+                if success:
+                    return _decode_token(fields)
+            case _:
+                if success:
+                    raise InvalidTokenError("token JSON must be an object")
+    except InvalidTokenError:
+        if success:
+            raise
+    raise TokenEndpointHTTPError("token endpoint HTTP status " + str(status), status)
+
+def _raise_provider_error(int64 status, dict[str, JsonValue] fields):
+    auto error = _read_string(fields, "error").unwrap_or("")
+    if error == "":
+        raise InvalidTokenError("OAuth error code must be non-empty")
+    auto description = _read_string(fields, "error_description")
+    auto uri = _read_string(fields, "error_uri")
+    auto message = "token endpoint rejected the request"
+    match error:
+        case "invalid_request":
+            raise InvalidRequestError(message, status, error, description, uri)
+        case "invalid_client":
+            raise InvalidClientError(message, status, error, description, uri)
+        case "invalid_grant":
+            raise InvalidGrantError(message, status, error, description, uri)
+        case "unauthorized_client":
+            raise UnauthorizedClientError(message, status, error, description, uri)
+        case "unsupported_grant_type":
+            raise UnsupportedGrantTypeError(message, status, error, description, uri)
+        case "invalid_scope":
+            raise InvalidScopeError(message, status, error, description, uri)
+        case _:
+            raise TokenEndpointError(message, status, error, description, uri)
