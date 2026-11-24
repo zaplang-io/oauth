@@ -30,5 +30,5 @@ introduces them.
 - Issue #2 owns the token model and refresh behavior. Issue #3 connects that
   behavior to the live token endpoint.
 
-The planned `scope` field and keyword depend on
-[zaplang-io/zap#1405](https://github.com/zaplang-io/zap/issues/1405).
+The token field and JSON key use `scope`. Zap supports the identifier through
+the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/zap/issues/1405).
