@@ -146,10 +146,29 @@ def _basic_authorization(str client_id, str client_secret) -> str:
 
 def _post_token_form(
     str token_endpoint,
-    str body,
-    dict[str, str] headers,
+    dict[str, str] form,
+    str client_id,
+    str client_secret,
+    str auth_method,
     int64 timeout,
 ) -> bytes:
+    if "client_id" in form or "client_secret" in form:
+        raise ValueError("client credentials must come from the endpoint configuration")
+    auto headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    }
+    auto fields = form
+    match auth_method:
+        case "client_secret_basic":
+            headers["Authorization"] = _basic_authorization(client_id, client_secret)
+        case "client_secret_post":
+            fields = form.copy()
+            fields["client_id"] = client_id
+            fields["client_secret"] = client_secret
+        case _:
+            raise ValueError("unsupported token endpoint authentication method")
+    auto body = _encode_token_form(fields)
     # A redirect can resend the credentials to a different destination.
     auto client = http.Client(follow=False, timeout=timeout)
     try:
