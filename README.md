@@ -7,8 +7,8 @@ OAuth 1/2 client for [Zap](https://github.com/zaplang-io/zap) — an official **
 - Design decisions: [DECISIONS.md](DECISIONS.md)
 
 The package supports OAuth 2 bearer tokens, token endpoint exchange,
-Authorization Code with PKCE, and Client Credentials. The
-[Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1) tracks the remaining work.
+Authorization Code with PKCE, Client Credentials, provider discovery, and Device
+Authorization. See the [Tier-1 epic](https://github.com/zaplang-io/oauth/issues/1).
 
 ## Goals
 
@@ -162,6 +162,35 @@ already have a document from a trusted source.
 HTTP status failures raise `ProviderDiscoveryHTTPError`, which exposes `status`.
 Invalid documents raise `InvalidProviderMetadataError`, with specific subtypes
 `IssuerMismatchError` and `ProviderMetadataTooLargeError`.
+
+## Device Authorization
+
+```zap
+import oauth
+
+client = oauth.Client(
+    "device-client", "", "https://issuer.example/token",
+    token_endpoint_auth_method="none",
+    device_authorization_endpoint="https://issuer.example/device",
+    timeout=5000,
+)
+authorization = client.device_authorization(scope=["read"])
+print(authorization.verification_uri, authorization.user_code)
+token = client.device_access_token(authorization)
+```
+
+Start device authorization in response to a user action. Display the user code
+and verification URI, and keep the device code private. If discovery advertises
+the device authorization endpoint, `Client.from_metadata` configures it.
+
+For caller-driven polling, wait `authorization.poll_after_ms()` milliseconds
+before calling `client.poll_device_access_token(authorization)`. It returns
+`None` while authorization is pending or backing off. An early call raises
+`DevicePollingTooSoonError` and exposes `retry_after_ms`. The default interval
+is five seconds when the provider omits it. `slow_down` adds five seconds, and
+a timed-out request doubles the interval. Both styles stop at completion,
+denial, or expiry. `DeviceAccessDeniedError` and `DeviceCodeExpiredError` are
+typed token endpoint errors. Local expiry uses status `0`.
 
 ## Build and test
 

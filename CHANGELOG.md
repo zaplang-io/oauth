@@ -16,3 +16,5 @@
 - Add bounded OIDC and RFC 8414 provider discovery, typed metadata, exact issuer
   validation, and client configuration from metadata.
   [#6](https://github.com/zaplang-io/oauth/issues/6)
+- Add Device Authorization with blocking and caller-driven polling, provider
+  backoff, and expiry-aware timeouts. [#7](https://github.com/zaplang-io/oauth/issues/7)
