@@ -265,6 +265,30 @@ struct Client:
     int64 timeout = 0
     str authorization_endpoint = ""
     str redirect_uri = ""
+    str device_authorization_endpoint = ""
+
+    # Apply validated endpoints while keeping credentials and client options
+    # under the caller's control.
+    def from_metadata(
+        ProviderMetadata metadata,
+        str client_id,
+        str client_secret,
+        str redirect_uri = "",
+        str token_endpoint_auth_method = "client_secret_basic",
+        int64 timeout = 0,
+    ) -> Client:
+        return Client(
+            client_id,
+            client_secret,
+            metadata.token_endpoint,
+            token_endpoint_auth_method,
+            timeout,
+            authorization_endpoint=metadata.authorization_endpoint.unwrap_or(""),
+            redirect_uri=redirect_uri,
+            device_authorization_endpoint=metadata.device_authorization_endpoint.unwrap_or(
+                "",
+            ),
+        )
 
     # Exchange a grant form for a bearer token. The client adds authentication.
     # Timeout is a total deadline in milliseconds, with zero for no deadline.
@@ -670,3 +694,184 @@ def _pkce_challenge(str verifier) -> str:
     auto digest = crypto.sha256_new()
     crypto.update(digest, octets)
     return base64.urlsafe_encode_nopad(crypto.digest(digest))
+
+
+const int64 _PROVIDER_METADATA_LIMIT = 65536
+
+# A discovery document is malformed or lacks metadata needed by this client.
+@exception
+struct InvalidProviderMetadataError:
+    str message
+
+# The issuer claim differs from the configured issuer identifier.
+@exception(InvalidProviderMetadataError)
+struct IssuerMismatchError:
+    str message
+
+# A provider metadata document exceeds the supported UTF-8 byte size.
+@exception(InvalidProviderMetadataError)
+struct ProviderMetadataTooLargeError:
+    str message
+
+# A discovery endpoint returned a status other than HTTP 200.
+@exception
+struct ProviderDiscoveryHTTPError:
+    str message
+    int64 status
+
+# Endpoints and capabilities advertised by an OAuth or OpenID provider.
+struct ProviderMetadata:
+    str issuer
+    str token_endpoint
+    Optional[str] authorization_endpoint = None
+    Optional[str] device_authorization_endpoint = None
+    Optional[str] jwks_uri = None
+    Optional[list[str]] scopes_supported = None
+    Optional[list[str]] grant_types_supported = None
+    Optional[list[str]] response_types_supported = None
+    Optional[list[str]] token_endpoint_auth_methods_supported = None
+    Optional[list[str]] code_challenge_methods_supported = None
+
+    # Parse a trusted document already available to the caller. The issuer
+    # must exactly match the configured issuer, including any trailing slash.
+    def from_json(str issuer, str document) -> ProviderMetadata:
+        _discovery_issuer(issuer)
+        if len(bytes(document)) > _PROVIDER_METADATA_LIMIT:
+            raise ProviderMetadataTooLargeError("provider metadata exceeds 65536 bytes")
+        try:
+            match _load_json(document):
+                case JsonValue.Object(fields):
+                    return _decode_provider_metadata(issuer, fields)
+                case _:
+                    raise InvalidProviderMetadataError(
+                        "provider metadata must be a JSON object",
+                    )
+        except InvalidTokenError as message:
+            raise InvalidProviderMetadataError(message)
+
+# Load provider metadata using OIDC discovery, falling back to RFC 8414 only
+# when the OIDC document is absent. Timeout is in milliseconds per request.
+def discover(str issuer, int64 timeout = 5000) -> ProviderMetadata:
+    if timeout < 0:
+        raise ValueError("provider discovery timeout must be non-negative")
+    auto oidc_url, oauth_url = _provider_metadata_urls(issuer)
+    auto client = http.Client(
+        follow=False,
+        timeout=timeout,
+        max_response_bytes=_PROVIDER_METADATA_LIMIT,
+    )
+    auto headers = {"Accept": "application/json"}
+    try:
+        auto response = client.get(oidc_url, headers)
+        auto oidc = http.status(response) != 404
+        if not oidc:
+            response = client.get(oauth_url, headers)
+        auto status = http.status(response)
+        if status != 200:
+            raise ProviderDiscoveryHTTPError(
+                "provider discovery HTTP status " + str(status),
+                status,
+            )
+        auto content_type = http.header(response, "content-type").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise InvalidProviderMetadataError(
+                "provider discovery requires application/json",
+            )
+        auto metadata = ProviderMetadata.from_json(issuer, http.body(response))
+        if oidc and metadata.authorization_endpoint.is_none():
+            raise InvalidProviderMetadataError(
+                "OpenID provider metadata is missing its authorization endpoint",
+            )
+        return metadata
+    except ResponseTooLargeError:
+        raise ProviderMetadataTooLargeError("provider metadata exceeds 65536 bytes")
+    finally:
+        client.shutdown()
+
+def _discovery_issuer(str issuer) -> UrlParts:
+    auto parts = _absolute_oauth_uri(issuer)
+    if not parts.has_authority or parts.host == "" or "?" in issuer:
+        raise ValueError("provider issuer must have a host and no query")
+    if parts.scheme != "https" and (parts.scheme != "http" or parts.host != "127.0.0.1" and parts.host != "::1"):
+        raise ValueError("provider issuer requires HTTPS outside numeric loopback")
+    return parts
+
+def _provider_metadata_urls(str issuer) -> (str, str):
+    auto endpoint = _discovery_issuer(issuer)
+    auto path = endpoint.path
+    if path.endswith("/"):
+        path = path[:-1]
+    endpoint.path = path + "/.well-known/openid-configuration"
+    auto oidc = url.build(endpoint)
+    endpoint.path = "/.well-known/oauth-authorization-server" + path
+    return (oidc, url.build(endpoint))
+
+def _metadata_endpoint(dict[str, JsonValue] fields, str key) -> Optional[str]:
+    auto value = _read_string(fields, key)
+    if value.is_some():
+        try:
+            _validate_token_endpoint(value.unwrap())
+        except ValueError:
+            raise InvalidProviderMetadataError(
+                key + " must be a valid provider endpoint URI",
+            )
+    return value
+
+def _metadata_strings(dict[str, JsonValue] fields, str key) -> Optional[list[str]]:
+    if key not in fields:
+        return None
+    match fields[key]:
+        case JsonValue.Array(items):
+            list[str] values = []
+            for item in items:
+                match item:
+                    case JsonValue.Str(value):
+                        if value == "":
+                            raise InvalidProviderMetadataError(
+                                key + " must contain non-empty strings",
+                            )
+                        values.append(value)
+                    case _:
+                        raise InvalidProviderMetadataError(
+                            key + " must contain strings",
+                        )
+            return Optional.Some(values)
+        case _:
+            raise InvalidProviderMetadataError(key + " must be a JSON array")
+
+def _decode_provider_metadata(
+    str expected_issuer,
+    dict[str, JsonValue] fields,
+) -> ProviderMetadata:
+    auto issuer = _read_string(fields, "issuer").unwrap_or("")
+    if issuer == "":
+        raise InvalidProviderMetadataError("provider metadata is missing its issuer")
+    if issuer != expected_issuer:
+        raise IssuerMismatchError(
+            "provider metadata issuer does not match the configured issuer",
+        )
+    auto token = _metadata_endpoint(fields, "token_endpoint").unwrap_or("")
+    if token == "":
+        raise InvalidProviderMetadataError(
+            "provider metadata is missing its token endpoint",
+        )
+    auto authorization = _metadata_endpoint(fields, "authorization_endpoint")
+    auto grants = _metadata_strings(fields, "grant_types_supported")
+    if authorization.is_none():
+        auto supported = grants.unwrap_or(["authorization_code", "implicit"])
+        if "authorization_code" in supported or "implicit" in supported:
+            raise InvalidProviderMetadataError(
+                "provider metadata is missing its authorization endpoint",
+            )
+    return ProviderMetadata(
+        issuer,
+        token,
+        authorization,
+        _metadata_endpoint(fields, "device_authorization_endpoint"),
+        _metadata_endpoint(fields, "jwks_uri"),
+        _metadata_strings(fields, "scopes_supported"),
+        grants,
+        _metadata_strings(fields, "response_types_supported"),
+        _metadata_strings(fields, "token_endpoint_auth_methods_supported"),
+        _metadata_strings(fields, "code_challenge_methods_supported"),
+    )

@@ -77,3 +77,20 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
   caches the last usable token, shares acquisitions across concurrent callers,
   and obtains a new token with another Client Credentials grant. The default
   refresh leeway is 60 seconds, matching the token model.
+
+## Provider metadata discovery ([#6](https://github.com/zaplang-io/oauth/issues/6))
+
+- `oauth.discover(issuer)` tries OpenID Connect discovery first. An HTTP
+  404 triggers fallback to the RFC 8414 path. For tenant issuers, OIDC appends
+  its well-known path and RFC 8414 inserts its well-known path before the
+  tenant path.
+- Require the returned issuer identifier to exactly match the configured
+  issuer, including its case, port, encoding, and trailing slash. The URL
+  construction rules trim one terminal slash only from the request path.
+- `ProviderMetadata.from_json(issuer, document)` parses a document that the
+  caller already has. `Client.from_metadata` uses its token, authorization,
+  and device endpoints with caller-supplied credentials and client options.
+- Limit metadata to 65,536 UTF-8 bytes with
+  [Zap’s bounded HTTP response support](https://github.com/zaplang-io/zap/issues/1448).
+  Discovery disables redirects, requires an HTTP 200 JSON response, and uses a
+  five-second deadline per request by default.

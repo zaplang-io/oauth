@@ -137,6 +137,32 @@ value. The source defaults to a 60-second leeway. An empty scope list omits
 the scope field. This grant requires client authentication and discards any
 refresh token returned by the provider.
 
+## Provider metadata
+
+Fetch a provider's discovery document and apply its endpoints to a client:
+
+```zap
+import oauth
+
+metadata = oauth.discover("https://issuer.example/tenant")
+client = oauth.Client.from_metadata(metadata, "service", "example-secret", timeout=5000)
+```
+
+Discovery tries OpenID Connect first and falls back to RFC 8414 on HTTP 404.
+The issuer claim must match exactly. The HTTP client caps the response body at
+65,536 bytes, disables redirects, and uses a five-second deadline per request
+by default. Supply `timeout` in milliseconds to change the deadline.
+
+Metadata exposes the validated endpoints and advertised capabilities, including
+scopes, grant types, and PKCE methods. An RFC 8414 document can omit the
+authorization endpoint if it advertises only grants that do not use it, such as
+Client Credentials. Use `ProviderMetadata.from_json(issuer, document)` when you
+already have a document from a trusted source.
+
+HTTP status failures raise `ProviderDiscoveryHTTPError`, which exposes `status`.
+Invalid documents raise `InvalidProviderMetadataError`, with specific subtypes
+`IssuerMismatchError` and `ProviderMetadataTooLargeError`.
+
 ## Build and test
 
 Run the native `zap test` suite against a temporary consumer that installs this
