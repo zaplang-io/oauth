@@ -696,6 +696,8 @@ def _pkce_challenge(str verifier) -> str:
     return base64.urlsafe_encode_nopad(crypto.digest(digest))
 
 
+const int64 _PROVIDER_METADATA_LIMIT = 65536
+
 # A discovery document is malformed or lacks metadata needed by this client.
 @exception
 struct InvalidProviderMetadataError:
@@ -710,6 +712,12 @@ struct IssuerMismatchError:
 @exception(InvalidProviderMetadataError)
 struct ProviderMetadataTooLargeError:
     str message
+
+# A discovery endpoint returned a status other than HTTP 200.
+@exception
+struct ProviderDiscoveryHTTPError:
+    str message
+    int64 status
 
 # Endpoints and capabilities advertised by an OAuth or OpenID provider.
 struct ProviderMetadata:
@@ -728,7 +736,7 @@ struct ProviderMetadata:
     # must exactly match the configured issuer, including any trailing slash.
     def from_json(str issuer, str document) -> ProviderMetadata:
         _discovery_issuer(issuer)
-        if len(bytes(document)) > 65536:
+        if len(bytes(document)) > _PROVIDER_METADATA_LIMIT:
             raise ProviderMetadataTooLargeError("provider metadata exceeds 65536 bytes")
         try:
             match _load_json(document):
@@ -740,6 +748,45 @@ struct ProviderMetadata:
                     )
         except InvalidTokenError as message:
             raise InvalidProviderMetadataError(message)
+
+# Load provider metadata using OIDC discovery, falling back to RFC 8414 only
+# when the OIDC document is absent. Timeout is in milliseconds per request.
+def discover(str issuer, int64 timeout = 5000) -> ProviderMetadata:
+    if timeout < 0:
+        raise ValueError("provider discovery timeout must be non-negative")
+    auto oidc_url, oauth_url = _provider_metadata_urls(issuer)
+    auto client = http.Client(
+        follow=False,
+        timeout=timeout,
+        max_response_bytes=_PROVIDER_METADATA_LIMIT,
+    )
+    auto headers = {"Accept": "application/json"}
+    try:
+        auto response = client.get(oidc_url, headers)
+        auto oidc = http.status(response) != 404
+        if not oidc:
+            response = client.get(oauth_url, headers)
+        auto status = http.status(response)
+        if status != 200:
+            raise ProviderDiscoveryHTTPError(
+                "provider discovery HTTP status " + str(status),
+                status,
+            )
+        auto content_type = http.header(response, "content-type").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise InvalidProviderMetadataError(
+                "provider discovery requires application/json",
+            )
+        auto metadata = ProviderMetadata.from_json(issuer, http.body(response))
+        if oidc and metadata.authorization_endpoint.is_none():
+            raise InvalidProviderMetadataError(
+                "OpenID provider metadata is missing its authorization endpoint",
+            )
+        return metadata
+    except ResponseTooLargeError:
+        raise ProviderMetadataTooLargeError("provider metadata exceeds 65536 bytes")
+    finally:
+        client.shutdown()
 
 def _discovery_issuer(str issuer) -> UrlParts:
     auto parts = _absolute_oauth_uri(issuer)

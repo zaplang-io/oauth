@@ -139,22 +139,29 @@ refresh token returned by the provider.
 
 ## Provider metadata
 
-Parse a discovery document that you already obtained from a trusted source and
-apply its endpoints to a client:
+Fetch a provider's discovery document and apply its endpoints to a client:
 
 ```zap
-metadata = oauth.ProviderMetadata.from_json("https://issuer.example/tenant", document)
+import oauth
+
+metadata = oauth.discover("https://issuer.example/tenant")
 client = oauth.Client.from_metadata(metadata, "service", "example-secret", timeout=5000)
 ```
 
-The issuer claim must match exactly. The parser accepts up to 65,536 UTF-8
-bytes, validates the endpoint URLs, and exposes advertised capabilities such
-as scopes, grant types, and PKCE methods. A token endpoint is required for the
-supported flows. An authorization endpoint may be omitted when the provider
-advertises only grants that do not use it, such as Client Credentials.
+Discovery tries OpenID Connect first and falls back to RFC 8414 on HTTP 404.
+The issuer claim must match exactly. The HTTP client caps the response body at
+65,536 bytes, disables redirects, and uses a five-second deadline per request
+by default. Supply `timeout` in milliseconds to change the deadline.
 
-Live discovery is tracked in [#6](https://github.com/zaplang-io/oauth/issues/6)
-and depends on [bounded HTTP response reads](https://github.com/zaplang-io/zap/issues/1448).
+Metadata exposes the validated endpoints and advertised capabilities, including
+scopes, grant types, and PKCE methods. An RFC 8414 document can omit the
+authorization endpoint if it advertises only grants that do not use it, such as
+Client Credentials. Use `ProviderMetadata.from_json(issuer, document)` when you
+already have a document from a trusted source.
+
+HTTP status failures raise `ProviderDiscoveryHTTPError`, which exposes `status`.
+Invalid documents raise `InvalidProviderMetadataError`, with specific subtypes
+`IssuerMismatchError` and `ProviderMetadataTooLargeError`.
 
 ## Build and test
 

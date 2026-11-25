@@ -80,7 +80,7 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
 
 ## Provider metadata discovery ([#6](https://github.com/zaplang-io/oauth/issues/6))
 
-- `oauth.discover(issuer)` will try OpenID Connect discovery first. An HTTP
+- `oauth.discover(issuer)` tries OpenID Connect discovery first. An HTTP
   404 triggers fallback to the RFC 8414 path. For tenant issuers, OIDC appends
   its well-known path and RFC 8414 inserts its well-known path before the
   tenant path.
@@ -90,6 +90,7 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
 - `ProviderMetadata.from_json(issuer, document)` parses a document that the
   caller already has. `Client.from_metadata` uses its token, authorization,
   and device endpoints with caller-supplied credentials and client options.
-- Limit metadata to 65,536 UTF-8 bytes. Live discovery depends on
-  [Zap’s bounded HTTP response support](https://github.com/zaplang-io/zap/issues/1448)
-  so the limit applies as the document is received.
+- Limit metadata to 65,536 UTF-8 bytes with
+  [Zap’s bounded HTTP response support](https://github.com/zaplang-io/zap/issues/1448).
+  Discovery disables redirects, requires an HTTP 200 JSON response, and uses a
+  five-second deadline per request by default.
