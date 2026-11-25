@@ -151,6 +151,7 @@ def _post_token_form(
     str client_secret,
     str auth_method,
     int64 timeout,
+    int64 max_response_bytes = 0,
 ) -> bytes:
     if "client_id" in form or "client_secret" in form:
         raise ValueError("client credentials must come from the endpoint configuration")
@@ -177,7 +178,11 @@ def _post_token_form(
             raise ValueError("unsupported token endpoint authentication method")
     auto body = _encode_token_form(fields)
     # A redirect can resend the credentials to a different destination.
-    auto client = http.Client(follow=False, timeout=timeout)
+    auto client = http.Client(
+        follow=False,
+        timeout=timeout,
+        max_response_bytes=max_response_bytes,
+    )
     try:
         return client.post(token_endpoint, body, headers)
     finally:
@@ -293,9 +298,12 @@ struct Client:
     # Exchange a grant form for a bearer token. The client adds authentication.
     # Timeout is a total deadline in milliseconds, with zero for no deadline.
     def fetch_token(self, dict[str, str] form) -> Token:
+        return self._fetch_token(form, self.timeout)
+
+    def _fetch_token(self, dict[str, str] form, int64 timeout) -> Token:
         if self.client_id == "":
             raise ValueError("client_id must be non-empty")
-        if self.timeout < 0:
+        if timeout < 0:
             raise ValueError("token endpoint timeout must be non-negative")
         auto grant_type = form.get("grant_type").unwrap_or("")
         if grant_type == "":
@@ -310,7 +318,7 @@ struct Client:
             self.client_id,
             self.client_secret,
             self.token_endpoint_auth_method,
-            self.timeout,
+            timeout,
         )
         return _decode_token_response(
             http.status(response),
@@ -332,14 +340,16 @@ struct Client:
         if leeway < 0:
             raise ValueError("token expiry leeway must be non-negative")
         auto form = _client_credentials_form(scope)
-        auto configured = Client(
+        return ClientCredentialsTokenSource(self._token_client(), form, leeway)
+
+    def _token_client(self) -> Client:
+        return Client(
             self.client_id,
             self.client_secret,
             self.token_endpoint,
             self.token_endpoint_auth_method,
             self.timeout,
         )
-        return ClientCredentialsTokenSource(configured, form, leeway)
 
     # Exchange a refresh credential for a replacement bearer token.
     def refresh_token(self, str refresh_token) -> Token:
@@ -355,6 +365,125 @@ struct Client:
             lambda credential: self.refresh_token(credential),
             leeway,
         )
+
+    # Request user and device codes from the configured RFC 8628 endpoint.
+    def device_authorization(self, list[str] scope = []) -> DeviceAuthorizationResponse:
+        if self.client_id == "":
+            raise ValueError("client_id must be non-empty")
+        if self.timeout < 0:
+            raise ValueError("device authorization timeout must be non-negative")
+        auto endpoint = _validate_token_endpoint(self.device_authorization_endpoint)
+        auto token_endpoint = _validate_token_endpoint(self.token_endpoint)
+        dict[str, str] form = {}
+        for item in scope:
+            _validate_scope_token(item)
+        if len(scope) > 0:
+            form["scope"] = " ".join(scope)
+        auto started = time.monotonic_ns()
+        try:
+            auto response = _post_token_form(
+                endpoint,
+                form,
+                self.client_id,
+                self.client_secret,
+                self.token_endpoint_auth_method,
+                self.timeout,
+                _DEVICE_RESPONSE_LIMIT,
+            )
+            return _device_response(response, started, self.client_id, token_endpoint)
+        except ResponseTooLargeError:
+            raise InvalidDeviceAuthorizationError(
+                "device authorization response exceeds 65536 bytes",
+            )
+
+    # Poll once, returning None while authorization is pending or backing off.
+    # Polling too early raises DevicePollingTooSoonError without a request.
+    def poll_device_access_token(
+        self,
+        DeviceAuthorizationResponse authorization,
+    ) -> Optional[Token]:
+        auto client = self._token_client()
+        client._validate_device_poll(authorization)
+        return client._poll_device_with_lock(authorization)
+
+    def _validate_device_poll(self, DeviceAuthorizationResponse authorization):
+        if self.client_id != authorization._client_id or _validate_token_endpoint(self.token_endpoint) != authorization._token_endpoint:
+            raise ValueError(
+                "device authorization belongs to a different client or token endpoint",
+            )
+        if self.timeout < 0:
+            raise ValueError("token endpoint timeout must be non-negative")
+
+    def _poll_device_with_lock(
+        self,
+        DeviceAuthorizationResponse authorization,
+    ) -> Optional[Token]:
+        sync.lock(authorization._poll_mutex)
+        try:
+            return self._poll_device(authorization)
+        finally:
+            sync.unlock(authorization._poll_mutex)
+
+    # Wait for authorization, respecting the same schedule as single polls.
+    def device_access_token(self, DeviceAuthorizationResponse authorization) -> Token:
+        auto client = self._token_client()
+        client._validate_device_poll(authorization)
+        while True:
+            time.sleep_ns(authorization._poll_after_ns())
+            try:
+                auto token = client._poll_device_with_lock(authorization)
+                if token.is_some():
+                    return token.unwrap()
+            except DevicePollingTooSoonError:
+                pass
+
+    def _poll_device(
+        self,
+        DeviceAuthorizationResponse authorization,
+    ) -> Optional[Token]:
+        if authorization._finished:
+            raise ValueError("device authorization has completed")
+        auto now = time.monotonic_ns()
+        auto remaining = authorization._deadline_ns - now
+        if remaining <= 0:
+            authorization._finished = True
+            raise DeviceCodeExpiredError(
+                "device authorization expired",
+                0,
+                "expired_token",
+            )
+        if authorization._next_poll_ns > now:
+            raise DevicePollingTooSoonError(
+                "device polling interval has not elapsed",
+                _ceil_millis(authorization._next_poll_ns - now),
+            )
+        auto timeout = _ceil_millis(remaining)
+        if self.timeout > 0:
+            timeout = min(timeout, self.timeout)
+        authorization._schedule_next(now)
+        try:
+            auto token = self._fetch_token(
+                {"grant_type": _DEVICE_GRANT, "device_code": authorization.device_code},
+                timeout,
+            )
+            authorization._finished = True
+            return Optional.Some(token)
+        except TimeoutError:
+            authorization._interval_seconds = authorization._interval_seconds + min(authorization._interval_seconds, 9223372036854775807 - authorization._interval_seconds)
+        except TokenEndpointError as failure:
+            match failure.error:
+                case "authorization_pending":
+                    pass
+                case "slow_down":
+                    authorization._interval_seconds = authorization._interval_seconds + min(5, 9223372036854775807 - authorization._interval_seconds)
+                case _:
+                    authorization._finished = True
+                    raise
+        except Exception:
+            authorization._finished = True
+            raise
+        authorization._schedule_next(time.monotonic_ns())
+        return None
 
     # Build an authorization URL with a new S256 verifier and an optional
     # caller-supplied state. Keep the returned tuple in the initiating session.
@@ -676,6 +805,10 @@ def _raise_provider_error(int64 status, dict[str, JsonValue] fields):
             raise UnsupportedGrantTypeError(message, status, error, description, uri)
         case "invalid_scope":
             raise InvalidScopeError(message, status, error, description, uri)
+        case "access_denied":
+            raise DeviceAccessDeniedError(message, status, error, description, uri)
+        case "expired_token":
+            raise DeviceCodeExpiredError(message, status, error, description, uri)
         case _:
             raise TokenEndpointError(message, status, error, description, uri)
 
@@ -875,3 +1008,174 @@ def _decode_provider_metadata(
         _metadata_strings(fields, "token_endpoint_auth_methods_supported"),
         _metadata_strings(fields, "code_challenge_methods_supported"),
     )
+
+const int64 _DEVICE_RESPONSE_LIMIT = 65536
+const str _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+# A device authorization response is malformed or unusable.
+@exception
+struct InvalidDeviceAuthorizationError:
+    str message
+
+# The device authorization endpoint returned an unsuccessful HTTP status.
+@exception
+struct DeviceAuthorizationHTTPError:
+    str message
+    int64 status
+
+# A caller attempted to poll before the device's next eligible request.
+@exception
+struct DevicePollingTooSoonError:
+    str message
+    int64 retry_after_ms
+
+# A device code was declined or expired. Keep the TokenEndpointError layout.
+@exception(TokenEndpointError)
+struct DeviceAccessDeniedError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+@exception(TokenEndpointError)
+struct DeviceCodeExpiredError:
+    str message
+    int64 status
+    str error = ""
+    Optional[str] error_description = None
+    Optional[str] error_uri = None
+
+# A device authorization started by the client. Display user_code and
+# verification_uri, and keep device_code private to the device.
+struct DeviceAuthorizationResponse:
+    str device_code
+    str user_code
+    str verification_uri
+    int64 expires_in
+    int64 interval
+    Optional[str] verification_uri_complete
+    int64 _deadline_ns
+    str _client_id
+    str _token_endpoint
+    int64 _interval_seconds
+    int64 _next_poll_ns
+    bool _finished = False
+    bytes _poll_mutex = sync.mutex()
+
+    # Milliseconds until the next poll or expiry, rounded up.
+    def poll_after_ms(self) -> int64:
+        return _ceil_millis(self._poll_after_ns())
+
+    def _poll_after_ns(self) -> int64:
+        sync.lock(self._poll_mutex)
+        try:
+            if self._finished:
+                return 0
+            return max(0, self._next_poll_ns - time.monotonic_ns())
+        finally:
+            sync.unlock(self._poll_mutex)
+
+    def _schedule_next(self, int64 now):
+        auto remaining = max(0, self._deadline_ns - now)
+        self._next_poll_ns = self._deadline_ns
+        if self._interval_seconds <= remaining // 1000000000:
+            self._next_poll_ns = now + self._interval_seconds * 1000000000
+
+def _ceil_millis(int64 nanos) -> int64:
+    if nanos <= 0:
+        return 0
+    return (nanos - 1) // 1000000 + 1
+
+def _device_response(
+    bytes response,
+    int64 started,
+    str client_id,
+    str token_endpoint,
+) -> DeviceAuthorizationResponse:
+    auto status = http.status(response)
+    try:
+        match _load_json(http.body(response)):
+            case JsonValue.Object(fields):
+                if "error" in fields:
+                    _raise_provider_error(status, fields)
+                if status == 200:
+                    auto content_type = http.header(response, "content-type").split(";")[0].strip().lower()
+                    if content_type != "application/json":
+                        raise InvalidDeviceAuthorizationError(
+                            "device authorization requires application/json",
+                        )
+                    return _decode_device_response(
+                        fields,
+                        started,
+                        client_id,
+                        token_endpoint,
+                    )
+            case _:
+                if status == 200:
+                    raise InvalidDeviceAuthorizationError(
+                        "device authorization response must be a JSON object",
+                    )
+    except InvalidTokenError as message:
+        if status == 200:
+            raise InvalidDeviceAuthorizationError(message)
+    raise DeviceAuthorizationHTTPError(
+        "device authorization HTTP status " + str(status),
+        status,
+    )
+
+def _decode_device_response(
+    dict[str, JsonValue] fields,
+    int64 started,
+    str client_id,
+    str token_endpoint,
+) -> DeviceAuthorizationResponse:
+    auto device_code = _read_string(fields, "device_code").unwrap_or("")
+    auto user_code = _read_string(fields, "user_code").unwrap_or("")
+    auto verification_uri = _read_string(fields, "verification_uri").unwrap_or("")
+    auto complete = _read_string(fields, "verification_uri_complete")
+    auto expires = _read_seconds(fields, "expires_in").unwrap_or(0)
+    auto interval = _read_seconds(fields, "interval").unwrap_or(5)
+    if device_code == "" or user_code == "" or verification_uri == "":
+        raise InvalidDeviceAuthorizationError(
+            "device response requires device_code, user_code, and verification_uri",
+        )
+    if expires < 1 or expires > (9223372036854775807 - started) // 1000000000:
+        raise InvalidDeviceAuthorizationError(
+            "device expires_in must be a positive representable lifetime",
+        )
+    if interval < 1:
+        raise InvalidDeviceAuthorizationError(
+            "device poll interval must be at least one second",
+        )
+    _validate_device_verification_uri(verification_uri)
+    if complete.is_some():
+        _validate_device_verification_uri(complete.unwrap())
+    auto result = DeviceAuthorizationResponse(
+        device_code,
+        user_code,
+        verification_uri,
+        expires,
+        interval,
+        complete,
+        started + expires * 1000000000,
+        client_id,
+        token_endpoint,
+        interval,
+        0,
+    )
+    result._schedule_next(time.monotonic_ns())
+    return result
+
+def _validate_device_verification_uri(str address):
+    for octet in bytes(address):
+        if octet < 33 or octet >= 127:
+            raise InvalidDeviceAuthorizationError(
+                "device verification URI must be an absolute HTTPS URL",
+            )
+    try:
+        _validate_token_endpoint(address.split("#")[0])
+    except ValueError:
+        raise InvalidDeviceAuthorizationError(
+            "device verification URI must be an absolute HTTPS URL",
+        )

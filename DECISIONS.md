@@ -94,3 +94,17 @@ the soft keyword change in [zaplang-io/zap#1405](https://github.com/zaplang-io/z
   [Zap’s bounded HTTP response support](https://github.com/zaplang-io/zap/issues/1448).
   Discovery disables redirects, requires an HTTP 200 JSON response, and uses a
   five-second deadline per request by default.
+
+## Device Authorization ([#7](https://github.com/zaplang-io/oauth/issues/7))
+
+- `Client.device_authorization(scope)` returns a `DeviceAuthorizationResponse`.
+  `Client.device_access_token(response)` waits for completion, while
+  `Client.poll_device_access_token(response)` makes one eligible request and
+  returns `None` when authorization is pending or backing off.
+- Both styles use the same schedule and serialize polling for a response. The
+  first poll also waits the advertised interval. Accept positive intervals,
+  default to five seconds when omitted, add five seconds for each `slow_down`,
+  and double the interval after a timeout, following RFC 8628.
+- Use a monotonic expiry deadline to stop waiting and bound each token request.
+  `poll_after_ms()` exposes the remaining wait. An early poll raises
+  `DevicePollingTooSoonError` with `retry_after_ms` before sending a request.
